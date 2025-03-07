@@ -1,0 +1,160 @@
+import android.app.Service;
+import android.content.Context;
+import android.content.Intent;
+import android.content.pm.ServiceInfo;
+import android.graphics.Bitmap;
+import android.graphics.PixelFormat;
+import android.hardware.display.DisplayManager;
+import android.hardware.display.VirtualDisplay;
+import android.media.Image;
+import android.media.ImageReader;
+import android.media.projection.MediaProjection;
+import android.media.projection.MediaProjectionManager;
+import android.os.Build;
+import android.os.IBinder;
+import android.util.DisplayMetrics;
+import android.view.WindowManager;
+import android.widget.TextView;
+import android.widget.Toast;
+
+import com.google.mlkit.vision.common.InputImage;
+import com.google.mlkit.vision.text.Text;
+import com.google.mlkit.vision.text.TextRecognition;
+import com.google.mlkit.vision.text.TextRecognizer;
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions;
+
+import org.json.JSONObject;
+
+import java.io.IOException;
+import java.net.URLEncoder;
+import java.nio.ByteBuffer;
+
+import okhttp3.Call;
+import okhttp3.Callback;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.Response;
+
+public class ScreenTranslateService extends Service {
+    private static final int REQUEST_SCREENSHOT = 1001;
+    private MediaProjectionManager mediaProjectionManager;
+    private MediaProjection mediaProjection;
+    private int screenWidth, screenHeight, screenDensity;
+    private TextView textView;
+    private WindowManager windowManager;
+    
+    // 此处已移除 Google API Key，改用免费翻译接口 MyMemory
+
+    @Override
+    public void onCreate() {
+        super.onCreate();
+        mediaProjectionManager = (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
+        WindowManager wm = (WindowManager) getSystemService(WINDOW_SERVICE);
+        DisplayMetrics metrics = new DisplayMetrics();
+        wm.getDefaultDisplay().getMetrics(metrics);
+        screenWidth = metrics.widthPixels;
+        screenHeight = metrics.heightPixels;
+        screenDensity = metrics.densityDpi;
+        
+        // 初始化悬浮窗中的 TextView（这里仅为示例，你可根据需要自定义 UI）
+        windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
+        textView = new TextView(this);
+        textView.setTextSize(20);
+        textView.setBackgroundColor(0x88000000); // 半透明背景
+        textView.setTextColor(0xFFFFFFFF);
+        // 此处可添加更多 UI 初始化代码，并将 textView 添加到悬浮窗中
+    }
+
+    @Override
+    public int onStartCommand(Intent intent, int flags, int startId) {
+        Intent captureIntent = mediaProjectionManager.createScreenCaptureIntent();
+        captureIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        startActivity(captureIntent);
+        return START_STICKY;
+    }
+
+    @Override
+    public IBinder onBind(Intent intent) {
+        return null;
+    }
+
+    private Bitmap captureScreen() {
+        if (mediaProjection == null) return null;
+
+        ImageReader imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2);
+        VirtualDisplay virtualDisplay = mediaProjection.createVirtualDisplay(
+                "ScreenCapture", screenWidth, screenHeight, screenDensity,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, imageReader.getSurface(), null, null
+        );
+
+        Image image = imageReader.acquireLatestImage();
+        if (image == null) return null;
+
+        ByteBuffer buffer = image.getPlanes()[0].getBuffer();
+        Bitmap bitmap = Bitmap.createBitmap(image.getWidth(), image.getHeight(), Bitmap.Config.ARGB_8888);
+        bitmap.copyPixelsFromBuffer(buffer);
+        image.close();
+
+        return bitmap;
+    }
+
+    private void captureAndTranslate() {
+        Bitmap bitmap = captureScreen();
+        if (bitmap == null) {
+            Toast.makeText(this, "截图失败", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        recognizeText(bitmap);
+    }
+
+    private void recognizeText(Bitmap bitmap) {
+        InputImage image = InputImage.fromBitmap(bitmap, 0);
+        TextRecognizer recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
+        recognizer.process(image)
+                .addOnSuccessListener(result -> {
+                    StringBuilder detectedText = new StringBuilder();
+                    for (Text.TextBlock block : result.getTextBlocks()) {
+                        detectedText.append(block.getText()).append("\n");
+                    }
+                    translateText(detectedText.toString());
+                })
+                .addOnFailureListener(e -> Toast.makeText(this, "OCR 失败", Toast.LENGTH_SHORT).show());
+    }
+
+    // 修改后使用免费的 MyMemory API 进行翻译
+    private void translateText(String text) {
+        OkHttpClient client = new OkHttpClient();
+        try {
+            String encodedText = URLEncoder.encode(text, "UTF-8");
+            String url = "https://api.mymemory.translated.net/get?q=" + encodedText + "&langpair=en|zh-CN";
+            Request request = new Request.Builder().url(url).get().build();
+
+            client.newCall(request).enqueue(new Callback() {
+                @Override
+                public void onResponse(Call call, Response response) throws IOException {
+                    try {
+                        JSONObject jsonObject = new JSONObject(response.body().string());
+                        JSONObject responseData = jsonObject.getJSONObject("responseData");
+                        String translatedText = responseData.getString("translatedText");
+                        showTranslation(translatedText);
+                    } catch (Exception e) {
+                        showTranslation("翻译失败");
+                    }
+                }
+                @Override
+                public void onFailure(Call call, IOException e) {
+                    showTranslation("网络错误");
+                }
+            });
+        } catch (Exception e) {
+            showTranslation("编码错误");
+        }
+    }
+
+    private void showTranslation(String translatedText) {
+        // 更新悬浮窗 UI，显示翻译结果
+        textView.setText(translatedText);
+        textView.setVisibility(android.view.View.VISIBLE);
+    }
+}
